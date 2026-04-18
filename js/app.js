@@ -1,16 +1,86 @@
 /* ============================================
    NOVEL STUDIO — Core Application Logic
+   v2.0 — Multi-Project + Image Upload Fix
    ============================================ */
 
-// ── Data Store Keys ──
-const KEYS = {
-  chapters: 'ns_chapters',
-  characters: 'ns_characters',
-  world: 'ns_world',
-  notes: 'ns_notes',
-  gallery: 'ns_gallery',
-  project: 'ns_project',
-};
+// ══════════════════════════════════════════
+//  PROJECT MANAGEMENT SYSTEM
+// ══════════════════════════════════════════
+const PROJECTS_INDEX_KEY = 'ns_projects_index';
+const ACTIVE_PROJECT_KEY = 'ns_active_project';
+
+function getProjectsIndex() {
+  try { return JSON.parse(localStorage.getItem(PROJECTS_INDEX_KEY)) || []; }
+  catch { return []; }
+}
+function saveProjectsIndex(list) {
+  localStorage.setItem(PROJECTS_INDEX_KEY, JSON.stringify(list));
+}
+function getActiveProjectId() {
+  let id = localStorage.getItem(ACTIVE_PROJECT_KEY);
+  const projects = getProjectsIndex();
+  if (!id || !projects.find(p => p.id === id)) {
+    if (projects.length === 0) {
+      // Migrate or create default project
+      id = migrateOrCreateDefault();
+    } else {
+      id = projects[0].id;
+    }
+    localStorage.setItem(ACTIVE_PROJECT_KEY, id);
+  }
+  return id;
+}
+function setActiveProject(id) {
+  localStorage.setItem(ACTIVE_PROJECT_KEY, id);
+}
+
+function migrateOrCreateDefault() {
+  const oldChapters = safeGet('ns_chapters');
+  const oldChars = safeGet('ns_characters');
+  const oldWorld = safeGet('ns_world');
+  const oldNotes = safeGet('ns_notes');
+  const oldGallery = safeGet('ns_gallery');
+  const oldProject = safeGetObj('ns_project');
+  const hasOldData = oldChapters.length || oldChars.length || oldWorld.length || oldNotes.length || oldGallery.length;
+
+  const id = uid();
+  const name = (oldProject && oldProject.title) ? oldProject.title : 'My Novel';
+  const projects = [{ id, name, created: new Date().toISOString() }];
+  saveProjectsIndex(projects);
+  setActiveProject(id);
+
+  if (hasOldData) {
+    localStorage.setItem('ns_' + id + '_chapters', JSON.stringify(oldChapters));
+    localStorage.setItem('ns_' + id + '_characters', JSON.stringify(oldChars));
+    localStorage.setItem('ns_' + id + '_world', JSON.stringify(oldWorld));
+    localStorage.setItem('ns_' + id + '_notes', JSON.stringify(oldNotes));
+    localStorage.setItem('ns_' + id + '_gallery', JSON.stringify(oldGallery));
+    localStorage.setItem('ns_' + id + '_project', JSON.stringify(oldProject || {}));
+    // Clean up old keys
+    ['ns_chapters','ns_characters','ns_world','ns_notes','ns_gallery','ns_project'].forEach(k => localStorage.removeItem(k));
+  }
+  return id;
+}
+
+function safeGet(key) {
+  try { return JSON.parse(localStorage.getItem(key)) || []; } catch { return []; }
+}
+function safeGetObj(key) {
+  try { return JSON.parse(localStorage.getItem(key)) || {}; } catch { return {}; }
+}
+
+// ── Project-Scoped Data Keys ──
+function KEYS() {
+  const pid = getActiveProjectId();
+  return {
+    chapters: 'ns_' + pid + '_chapters',
+    characters: 'ns_' + pid + '_characters',
+    world: 'ns_' + pid + '_world',
+    notes: 'ns_' + pid + '_notes',
+    gallery: 'ns_' + pid + '_gallery',
+    project: 'ns_' + pid + '_project',
+  };
+}
 
 // ── Utility ──
 function uid() {
@@ -62,9 +132,9 @@ function escapeHtml(s) {
 function toast(msg, type = 'success') {
   const c = document.getElementById('toastContainer');
   const t = document.createElement('div');
-  t.className = `toast toast-${type}`;
-  const icons = { success: '✓', error: '✗', info: 'ℹ' };
-  t.innerHTML = `<span>${icons[type] || '✓'}</span> ${escapeHtml(msg)}`;
+  t.className = 'toast toast-' + type;
+  const icons = { success: '\u2713', error: '\u2717', info: '\u2139' };
+  t.innerHTML = '<span>' + (icons[type] || '\u2713') + '</span> ' + escapeHtml(msg);
   c.appendChild(t);
   setTimeout(() => { t.style.opacity = '0'; t.style.transform = 'translateX(40px)'; setTimeout(() => t.remove(), 300); }, 3000);
 }
@@ -82,6 +152,85 @@ function updateStorageIndicator() {
   if (bar) bar.style.width = Math.min((kb / 5120) * 100, 100) + '%';
 }
 
+// ══════════════════════════════════════════
+//  PROJECT SWITCHER UI
+// ══════════════════════════════════════════
+function renderProjectSwitcher() {
+  const container = document.getElementById('projectSwitcher');
+  const projects = getProjectsIndex();
+  const activeId = getActiveProjectId();
+
+  let html = '<select class="project-switcher-select" onchange="switchProject(this.value)">';
+  projects.forEach(p => {
+    html += '<option value="' + p.id + '"' + (p.id === activeId ? ' selected' : '') + '>' + escapeHtml(p.name) + '</option>';
+  });
+  html += '</select>';
+  html += '<div class="project-switcher-actions">';
+  html += '<button class="btn btn-secondary btn-sm" onclick="createNewProject()">+ New</button>';
+  html += '<button class="btn btn-secondary btn-sm" onclick="renameCurrentProject()">Rename</button>';
+  if (projects.length > 1) {
+    html += '<button class="btn btn-danger btn-sm" onclick="deleteCurrentProject()">Delete</button>';
+  }
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+function switchProject(id) {
+  // Save current editor state first
+  if (activeChapterId) autoSave();
+  activeChapterId = null;
+  setActiveProject(id);
+  renderProjectSwitcher();
+  // Reset editor view
+  document.getElementById('editorActive').style.display = 'none';
+  document.getElementById('editorEmptyState').style.display = 'flex';
+  // Refresh current page
+  navigateTo(currentPage);
+  const proj = getProjectsIndex().find(p => p.id === id);
+  toast('Switched to: ' + (proj ? proj.name : 'Project'));
+}
+
+function createNewProject() {
+  const name = prompt('Enter a name for your new novel project:');
+  if (!name || !name.trim()) return;
+  const projects = getProjectsIndex();
+  const newProj = { id: uid(), name: name.trim(), created: new Date().toISOString() };
+  projects.push(newProj);
+  saveProjectsIndex(projects);
+  switchProject(newProj.id);
+  toast('Project "' + newProj.name + '" created!');
+}
+
+function renameCurrentProject() {
+  const activeId = getActiveProjectId();
+  const projects = getProjectsIndex();
+  const proj = projects.find(p => p.id === activeId);
+  if (!proj) return;
+  const newName = prompt('Enter new project name:', proj.name);
+  if (!newName || !newName.trim()) return;
+  proj.name = newName.trim();
+  saveProjectsIndex(projects);
+  renderProjectSwitcher();
+  toast('Project renamed to "' + proj.name + '"');
+}
+
+function deleteCurrentProject() {
+  const activeId = getActiveProjectId();
+  const projects = getProjectsIndex();
+  if (projects.length <= 1) { toast('Cannot delete the only project', 'error'); return; }
+  const proj = projects.find(p => p.id === activeId);
+  if (!confirm('Delete project "' + (proj ? proj.name : '') + '" and ALL its data? This cannot be undone.')) return;
+  if (!confirm('Final confirmation: Permanently delete this project?')) return;
+  // Remove all data for this project
+  const k = KEYS();
+  Object.values(k).forEach(key => localStorage.removeItem(key));
+  // Remove from index
+  const updated = projects.filter(p => p.id !== activeId);
+  saveProjectsIndex(updated);
+  switchProject(updated[0].id);
+  toast('Project deleted');
+}
+
 // ── Navigation ──
 let currentPage = 'dashboard';
 
@@ -91,7 +240,7 @@ function navigateTo(page) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   const pv = document.getElementById('page-' + page);
   if (pv) pv.classList.add('active');
-  const ni = document.querySelector(`.nav-item[data-page="${page}"]`);
+  const ni = document.querySelector('.nav-item[data-page="' + page + '"]');
   if (ni) ni.classList.add('active');
   const mt = document.getElementById('mobilePageTitle');
   if (mt) mt.textContent = ni ? ni.textContent.trim().split('\n')[0].trim() : page;
@@ -138,9 +287,10 @@ function closeLightbox() {
 //  DASHBOARD
 // ══════════════════════════════════════════
 function refreshDashboard() {
-  const chapters = getData(KEYS.chapters);
-  const characters = getData(KEYS.characters);
-  const notes = getData(KEYS.notes);
+  const k = KEYS();
+  const chapters = getData(k.chapters);
+  const characters = getData(k.characters);
+  const notes = getData(k.notes);
   let totalWords = 0;
   chapters.forEach(ch => totalWords += wordCount(ch.content || ''));
 
@@ -157,7 +307,7 @@ function refreshDashboard() {
   // Recent chapters
   const rc = document.getElementById('recentChapters');
   if (chapters.length === 0) {
-    rc.innerHTML = `<div class="empty-state"><div class="empty-icon">✍️</div><h3>No chapters yet</h3><p>Start your first chapter to see it here.</p><button class="btn btn-primary" onclick="navigateTo('editor')">Create First Chapter</button></div>`;
+    rc.innerHTML = '<div class="empty-state"><div class="empty-icon">\u270D\uFE0F</div><h3>No chapters yet</h3><p>Start your first chapter to see it here.</p><button class="btn btn-primary" onclick="navigateTo(\'editor\')">Create First Chapter</button></div>';
     return;
   }
   const sorted = [...chapters].sort((a, b) => new Date(b.updated) - new Date(a.updated)).slice(0, 5);
@@ -165,11 +315,10 @@ function refreshDashboard() {
     const wc = wordCount(ch.content || '');
     const statusClass = ch.status === 'complete' ? 'status-complete' : ch.status === 'progress' ? 'status-progress' : 'status-draft';
     const statusLabel = ch.status === 'complete' ? 'Complete' : ch.status === 'progress' ? 'In Progress' : 'Draft';
-    return `<div class="chapter-list-item" onclick="navigateTo('editor');setTimeout(()=>selectChapter('${ch.id}'),100)">
-      <div class="chapter-number">${ch.order || i + 1}</div>
-      <div class="chapter-info"><h4>${escapeHtml(ch.title || 'Untitled')}</h4><div class="chapter-meta">${wc.toLocaleString()} words · ${timeAgo(ch.updated)}</div></div>
-      <span class="chapter-status ${statusClass}">${statusLabel}</span>
-    </div>`;
+    return '<div class="chapter-list-item" onclick="navigateTo(\'editor\');setTimeout(()=>selectChapter(\'' + ch.id + '\'),100)">' +
+      '<div class="chapter-number">' + (ch.order || i + 1) + '</div>' +
+      '<div class="chapter-info"><h4>' + escapeHtml(ch.title || 'Untitled') + '</h4><div class="chapter-meta">' + wc.toLocaleString() + ' words \u00B7 ' + timeAgo(ch.updated) + '</div></div>' +
+      '<span class="chapter-status ' + statusClass + '">' + statusLabel + '</span></div>';
   }).join('');
 }
 
@@ -180,7 +329,8 @@ let activeChapterId = null;
 let saveTimer = null;
 
 function addNewChapter() {
-  const chapters = getData(KEYS.chapters);
+  const k = KEYS();
+  const chapters = getData(k.chapters);
   const ch = {
     id: uid(),
     title: 'Chapter ' + (chapters.length + 1),
@@ -191,14 +341,15 @@ function addNewChapter() {
     updated: new Date().toISOString(),
   };
   chapters.push(ch);
-  setData(KEYS.chapters, chapters);
+  setData(k.chapters, chapters);
   refreshChapterList();
   selectChapter(ch.id);
   toast('New chapter created');
 }
 
 function refreshChapterList() {
-  const chapters = getData(KEYS.chapters);
+  const k = KEYS();
+  const chapters = getData(k.chapters);
   const list = document.getElementById('chapterList');
   if (chapters.length === 0) {
     list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px;">No chapters yet</div>';
@@ -206,17 +357,17 @@ function refreshChapterList() {
   }
   list.innerHTML = chapters.sort((a, b) => a.order - b.order).map(ch => {
     const isActive = ch.id === activeChapterId;
-    return `<div class="ch-item ${isActive ? 'active' : ''}" onclick="selectChapter('${ch.id}')">
-      <span class="ch-num">${ch.order}</span>
-      <span class="ch-title">${escapeHtml(ch.title || 'Untitled')}</span>
-    </div>`;
+    return '<div class="ch-item ' + (isActive ? 'active' : '') + '" onclick="selectChapter(\'' + ch.id + '\')">' +
+      '<span class="ch-num">' + ch.order + '</span>' +
+      '<span class="ch-title">' + escapeHtml(ch.title || 'Untitled') + '</span></div>';
   }).join('');
   document.getElementById('chapterCount').textContent = chapters.length;
 }
 
 function selectChapter(id) {
   activeChapterId = id;
-  const chapters = getData(KEYS.chapters);
+  const k = KEYS();
+  const chapters = getData(k.chapters);
   const ch = chapters.find(c => c.id === id);
   if (!ch) return;
   document.getElementById('editorEmptyState').style.display = 'none';
@@ -238,13 +389,14 @@ function onEditorChange() {
 
 function autoSave() {
   if (!activeChapterId) return;
-  const chapters = getData(KEYS.chapters);
+  const k = KEYS();
+  const chapters = getData(k.chapters);
   const ch = chapters.find(c => c.id === activeChapterId);
   if (!ch) return;
   ch.title = document.getElementById('editorTitle').value;
   ch.content = document.getElementById('editorContent').innerHTML;
   ch.updated = new Date().toISOString();
-  setData(KEYS.chapters, chapters);
+  setData(k.chapters, chapters);
   markSaved();
   refreshChapterList();
 }
@@ -264,8 +416,8 @@ function updateEditorCounts() {
   document.getElementById('edCharCount').textContent = charCount(html).toLocaleString();
 }
 
-function execCmd(cmd, val = null) {
-  document.execCommand(cmd, false, val);
+function execCmd(cmd, val) {
+  document.execCommand(cmd, false, val || null);
   document.getElementById('editorContent').focus();
   onEditorChange();
 }
@@ -275,16 +427,26 @@ function insertDivider() {
   onEditorChange();
 }
 
-function insertEditorImage() {
-  const url = prompt('Enter image URL:');
-  if (url) {
-    document.execCommand('insertHTML', false, `<img src="${url}" style="max-width:100%;border-radius:8px;margin:1em 0;">`);
-    onEditorChange();
-  }
+// ── FIXED: Image Upload (no more URL prompt) ──
+function triggerEditorImageUpload() {
+  document.getElementById('editorImageUpload').click();
 }
 
-// Chapter context menu / reorder / delete via right-click or long press
-// We'll add a simple status toggle + delete
+function handleEditorImageUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    document.getElementById('editorContent').focus();
+    document.execCommand('insertHTML', false, '<img src="' + e.target.result + '" style="max-width:100%;border-radius:8px;margin:1em 0;">');
+    onEditorChange();
+    toast('Image inserted');
+  };
+  reader.readAsDataURL(file);
+  event.target.value = '';
+}
+
+// Chapter context menu
 document.addEventListener('contextmenu', function(e) {
   const chItem = e.target.closest('.ch-item');
   if (chItem) {
@@ -293,14 +455,14 @@ document.addEventListener('contextmenu', function(e) {
     if (!id) return;
     const action = prompt('Type "delete" to delete this chapter, or "draft"/"progress"/"complete" to change status:');
     if (!action) return;
-    const chapters = getData(KEYS.chapters);
+    const k = KEYS();
+    const chapters = getData(k.chapters);
     if (action.toLowerCase() === 'delete') {
       const idx = chapters.findIndex(c => c.id === id);
       if (idx > -1) {
         chapters.splice(idx, 1);
-        // Re-order
         chapters.forEach((c, i) => c.order = i + 1);
-        setData(KEYS.chapters, chapters);
+        setData(k.chapters, chapters);
         activeChapterId = null;
         document.getElementById('editorActive').style.display = 'none';
         document.getElementById('editorEmptyState').style.display = 'flex';
@@ -309,7 +471,7 @@ document.addEventListener('contextmenu', function(e) {
       }
     } else if (['draft', 'progress', 'complete'].includes(action.toLowerCase())) {
       const ch = chapters.find(c => c.id === id);
-      if (ch) { ch.status = action.toLowerCase(); setData(KEYS.chapters, chapters); toast('Status updated'); }
+      if (ch) { ch.status = action.toLowerCase(); setData(k.chapters, chapters); toast('Status updated'); }
     }
   }
 });
@@ -320,11 +482,13 @@ document.addEventListener('contextmenu', function(e) {
 let editingCharId = null;
 let viewingCharId = null;
 
-function openCharModal(editId = null) {
+function openCharModal(editId) {
+  editId = editId || null;
   editingCharId = editId;
   document.getElementById('charModalTitle').textContent = editId ? 'Edit Character' : 'New Character';
   if (editId) {
-    const chars = getData(KEYS.characters);
+    const k = KEYS();
+    const chars = getData(k.characters);
     const ch = chars.find(c => c.id === editId);
     if (ch) {
       document.getElementById('charName').value = ch.name || '';
@@ -355,7 +519,8 @@ function saveCharacter() {
   const name = document.getElementById('charName').value.trim();
   if (!name) { toast('Name is required', 'error'); return; }
 
-  const chars = getData(KEYS.characters);
+  const k = KEYS();
+  const chars = getData(k.characters);
   const data = {
     name,
     title: document.getElementById('charTitle').value.trim(),
@@ -386,7 +551,7 @@ function saveCharacter() {
       if (!imgData) data.image = null;
       chars.push(data);
     }
-    setData(KEYS.characters, chars);
+    setData(k.characters, chars);
     closeModal('charModal');
     refreshCharacterGrid();
     if (viewingCharId === editingCharId && editingCharId) showCharDetail(editingCharId);
@@ -404,35 +569,32 @@ function saveCharacter() {
 }
 
 function refreshCharacterGrid() {
-  const chars = getData(KEYS.characters);
+  const k = KEYS();
+  const chars = getData(k.characters);
   const grid = document.getElementById('characterGrid');
   document.getElementById('charCount').textContent = chars.length;
   if (chars.length === 0) {
-    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><div class="empty-icon">👤</div><h3>No characters yet</h3><p>Build your cast of characters to bring your story to life.</p><button class="btn btn-primary" onclick="openCharModal()">Create First Character</button></div>`;
+    grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1;"><div class="empty-icon">\uD83D\uDC64</div><h3>No characters yet</h3><p>Build your cast of characters to bring your story to life.</p><button class="btn btn-primary" onclick="openCharModal()">Create First Character</button></div>';
     return;
   }
   grid.innerHTML = chars.map(ch => {
     const roleClass = 'role-' + (ch.role || 'minor');
     const roleLabel = (ch.role || 'minor').charAt(0).toUpperCase() + (ch.role || 'minor').slice(1);
     const avatarContent = ch.image
-      ? `<img src="${ch.image}" alt="${escapeHtml(ch.name)}">`
+      ? '<img src="' + ch.image + '" alt="' + escapeHtml(ch.name) + '">'
       : getInitialEmoji(ch.name);
-    return `<div class="character-card" onclick="showCharDetail('${ch.id}')">
-      <div class="character-avatar">${avatarContent}<span class="character-role-badge ${roleClass}">${roleLabel}</span></div>
-      <div class="character-card-body">
-        <h4>${escapeHtml(ch.name)}</h4>
-        ${ch.title ? `<div class="char-title">${escapeHtml(ch.title)}</div>` : ''}
-        <p>${escapeHtml(ch.backstory || ch.appearance || 'No description yet.')}</p>
-        <div class="character-tags">
-          ${(ch.traits || []).slice(0, 3).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}
-        </div>
-      </div>
-    </div>`;
+    return '<div class="character-card" onclick="showCharDetail(\'' + ch.id + '\')">' +
+      '<div class="character-avatar">' + avatarContent + '<span class="character-role-badge ' + roleClass + '">' + roleLabel + '</span></div>' +
+      '<div class="character-card-body"><h4>' + escapeHtml(ch.name) + '</h4>' +
+      (ch.title ? '<div class="char-title">' + escapeHtml(ch.title) + '</div>' : '') +
+      '<p>' + escapeHtml(ch.backstory || ch.appearance || 'No description yet.') + '</p>' +
+      '<div class="character-tags">' + (ch.traits || []).slice(0, 3).map(t => '<span class="tag">' + escapeHtml(t) + '</span>').join('') + '</div>' +
+      '</div></div>';
   }).join('');
 }
 
 function getInitialEmoji(name) {
-  const emojis = ['🗡️','🛡️','🔥','⚡','🌙','💎','🦊','🐺','🌸','👑','✨','🎭'];
+  const emojis = ['\uD83D\uDDE1\uFE0F','\uD83D\uDEE1\uFE0F','\uD83D\uDD25','\u26A1','\uD83C\uDF19','\uD83D\uDC8E','\uD83E\uDD8A','\uD83D\uDC3A','\uD83C\uDF38','\uD83D\uDC51','\u2728','\uD83C\uDFAD'];
   let hash = 0;
   for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
   return emojis[Math.abs(hash) % emojis.length];
@@ -440,7 +602,8 @@ function getInitialEmoji(name) {
 
 function showCharDetail(id) {
   viewingCharId = id;
-  const chars = getData(KEYS.characters);
+  const k = KEYS();
+  const chars = getData(k.characters);
   const ch = chars.find(c => c.id === id);
   if (!ch) return;
 
@@ -449,32 +612,30 @@ function showCharDetail(id) {
   dv.classList.add('active');
 
   const avatarContent = ch.image
-    ? `<img src="${ch.image}" alt="${escapeHtml(ch.name)}">`
-    : `<span style="font-size:60px">${getInitialEmoji(ch.name)}</span>`;
+    ? '<img src="' + ch.image + '" alt="' + escapeHtml(ch.name) + '">'
+    : '<span style="font-size:60px">' + getInitialEmoji(ch.name) + '</span>';
 
-  document.getElementById('charDetailContent').innerHTML = `
-    <div class="char-detail-header">
-      <div class="char-detail-avatar">${avatarContent}</div>
-      <div class="char-detail-info">
-        <h2>${escapeHtml(ch.name)}</h2>
-        ${ch.title ? `<div class="char-subtitle">${escapeHtml(ch.title)}</div>` : ''}
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
-          <span class="tag tag-primary">${(ch.role || 'minor').charAt(0).toUpperCase() + (ch.role || '').slice(1)}</span>
-          ${ch.age ? `<span class="tag">Age: ${escapeHtml(ch.age)}</span>` : ''}
-          ${ch.gender ? `<span class="tag">${escapeHtml(ch.gender)}</span>` : ''}
-          ${ch.species ? `<span class="tag tag-gold">${escapeHtml(ch.species)}</span>` : ''}
-        </div>
-      </div>
-    </div>
-    <div class="char-attributes">
-      ${ch.traits && ch.traits.length ? `<div class="char-attr"><div class="attr-label">Personality</div><div class="attr-value">${ch.traits.map(t=>escapeHtml(t)).join(', ')}</div></div>` : ''}
-      ${ch.abilities && ch.abilities.length ? `<div class="char-attr"><div class="attr-label">Abilities</div><div class="attr-value">${ch.abilities.map(t=>escapeHtml(t)).join(', ')}</div></div>` : ''}
-    </div>
-    ${ch.appearance ? `<div class="char-section"><h3>👁️ Appearance</h3><p>${escapeHtml(ch.appearance)}</p></div>` : ''}
-    ${ch.backstory ? `<div class="char-section"><h3>📜 Backstory</h3><p>${escapeHtml(ch.backstory)}</p></div>` : ''}
-    ${ch.notes ? `<div class="char-section"><h3>📝 Notes</h3><p>${escapeHtml(ch.notes)}</p></div>` : ''}
-    <div style="font-size:12px;color:var(--text-muted);margin-top:20px;">Created ${formatDate(ch.created)} · Updated ${formatDate(ch.updated)}</div>
-  `;
+  let detailHtml = '<div class="char-detail-header"><div class="char-detail-avatar">' + avatarContent + '</div>' +
+    '<div class="char-detail-info"><h2>' + escapeHtml(ch.name) + '</h2>' +
+    (ch.title ? '<div class="char-subtitle">' + escapeHtml(ch.title) + '</div>' : '') +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">' +
+    '<span class="tag tag-primary">' + ((ch.role || 'minor').charAt(0).toUpperCase() + (ch.role || '').slice(1)) + '</span>' +
+    (ch.age ? '<span class="tag">Age: ' + escapeHtml(ch.age) + '</span>' : '') +
+    (ch.gender ? '<span class="tag">' + escapeHtml(ch.gender) + '</span>' : '') +
+    (ch.species ? '<span class="tag tag-gold">' + escapeHtml(ch.species) + '</span>' : '') +
+    '</div></div></div>';
+
+  detailHtml += '<div class="char-attributes">';
+  if (ch.traits && ch.traits.length) detailHtml += '<div class="char-attr"><div class="attr-label">Personality</div><div class="attr-value">' + ch.traits.map(t => escapeHtml(t)).join(', ') + '</div></div>';
+  if (ch.abilities && ch.abilities.length) detailHtml += '<div class="char-attr"><div class="attr-label">Abilities</div><div class="attr-value">' + ch.abilities.map(t => escapeHtml(t)).join(', ') + '</div></div>';
+  detailHtml += '</div>';
+
+  if (ch.appearance) detailHtml += '<div class="char-section"><h3>\uD83D\uDC41\uFE0F Appearance</h3><p>' + escapeHtml(ch.appearance) + '</p></div>';
+  if (ch.backstory) detailHtml += '<div class="char-section"><h3>\uD83D\uDCDC Backstory</h3><p>' + escapeHtml(ch.backstory) + '</p></div>';
+  if (ch.notes) detailHtml += '<div class="char-section"><h3>\uD83D\uDCDD Notes</h3><p>' + escapeHtml(ch.notes) + '</p></div>';
+  detailHtml += '<div style="font-size:12px;color:var(--text-muted);margin-top:20px;">Created ' + formatDate(ch.created) + ' \u00B7 Updated ' + formatDate(ch.updated) + '</div>';
+
+  document.getElementById('charDetailContent').innerHTML = detailHtml;
 }
 
 function closeCharDetail() {
@@ -491,9 +652,10 @@ function editCurrentChar() {
 function deleteCurrentChar() {
   if (!viewingCharId) return;
   if (!confirm('Delete this character permanently?')) return;
-  let chars = getData(KEYS.characters);
+  const k = KEYS();
+  let chars = getData(k.characters);
   chars = chars.filter(c => c.id !== viewingCharId);
-  setData(KEYS.characters, chars);
+  setData(k.characters, chars);
   closeCharDetail();
   toast('Character deleted');
 }
@@ -512,21 +674,16 @@ function filterCharacters() {
 let editingWorldId = null;
 let currentWorldTab = 'all';
 
-const worldIcons = {
-  location: '🗺️', magic: '✨', faction: '⚔️',
-  lore: '📜', item: '🔮', creature: '🐉'
-};
-const worldColors = {
-  location: 'var(--success)', magic: 'var(--primary)',
-  faction: 'var(--danger)', lore: 'var(--accent)',
-  item: 'var(--info)', creature: 'var(--success)'
-};
+const worldIcons = { location: '\uD83D\uDDFA\uFE0F', magic: '\u2728', faction: '\u2694\uFE0F', lore: '\uD83D\uDCDC', item: '\uD83D\uDD2E', creature: '\uD83D\uDC09' };
+const worldColors = { location: 'var(--success)', magic: 'var(--primary)', faction: 'var(--danger)', lore: 'var(--accent)', item: 'var(--info)', creature: 'var(--success)' };
 
-function openWorldModal(editId = null) {
+function openWorldModal(editId) {
+  editId = editId || null;
   editingWorldId = editId;
   document.getElementById('worldModalTitle').textContent = editId ? 'Edit Entry' : 'New World Entry';
   if (editId) {
-    const entries = getData(KEYS.world);
+    const k = KEYS();
+    const entries = getData(k.world);
     const e = entries.find(x => x.id === editId);
     if (e) {
       document.getElementById('worldName').value = e.name || '';
@@ -551,8 +708,8 @@ function openWorldModal(editId = null) {
 function saveWorldEntry() {
   const name = document.getElementById('worldName').value.trim();
   if (!name) { toast('Name is required', 'error'); return; }
-
-  const entries = getData(KEYS.world);
+  const k = KEYS();
+  const entries = getData(k.world);
   const data = {
     name,
     category: document.getElementById('worldCategory').value,
@@ -565,7 +722,6 @@ function saveWorldEntry() {
     tags: document.getElementById('worldTags').value.split(',').map(t => t.trim()).filter(Boolean),
     updated: new Date().toISOString(),
   };
-
   if (editingWorldId) {
     const idx = entries.findIndex(e => e.id === editingWorldId);
     if (idx > -1) entries[idx] = { ...entries[idx], ...data };
@@ -574,7 +730,7 @@ function saveWorldEntry() {
     data.created = new Date().toISOString();
     entries.push(data);
   }
-  setData(KEYS.world, entries);
+  setData(k.world, entries);
   closeModal('worldModal');
   refreshWorldEntries();
   toast(editingWorldId ? 'Entry updated' : 'Entry created');
@@ -582,54 +738,55 @@ function saveWorldEntry() {
 }
 
 function refreshWorldEntries() {
-  const entries = getData(KEYS.world);
+  const k = KEYS();
+  const entries = getData(k.world);
   const container = document.getElementById('worldEntries');
   const filtered = currentWorldTab === 'all' ? entries : entries.filter(e => e.category === currentWorldTab);
-  const q = (document.getElementById('worldSearch')?.value || '').toLowerCase();
+  const q = (document.getElementById('worldSearch') ? document.getElementById('worldSearch').value : '').toLowerCase();
   const shown = q ? filtered.filter(e => (e.name + e.description + e.shortDesc).toLowerCase().includes(q)) : filtered;
 
   if (shown.length === 0) {
-    container.innerHTML = `<div class="empty-state"><div class="empty-icon">🌍</div><h3>No entries found</h3><p>${currentWorldTab !== 'all' ? 'No entries in this category yet.' : 'Start building your world.'}</p><button class="btn btn-primary" onclick="openWorldModal()">Create Entry</button></div>`;
+    container.innerHTML = '<div class="empty-state"><div class="empty-icon">\uD83C\uDF0D</div><h3>No entries found</h3><p>' + (currentWorldTab !== 'all' ? 'No entries in this category yet.' : 'Start building your world.') + '</p><button class="btn btn-primary" onclick="openWorldModal()">Create Entry</button></div>';
     return;
   }
 
   container.innerHTML = shown.map(e => {
-    const icon = worldIcons[e.category] || '📄';
+    const icon = worldIcons[e.category] || '\uD83D\uDCC4';
     const color = worldColors[e.category] || 'var(--text-muted)';
     const catLabel = e.category ? e.category.charAt(0).toUpperCase() + e.category.slice(1) : '';
-    return `<div class="world-entry" id="we-${e.id}">
-      <div class="world-entry-header" onclick="toggleWorldEntry('${e.id}')">
-        <div class="world-entry-icon" style="background:${color}20;color:${color}">${icon}</div>
-        <div class="world-entry-title">
-          <h4>${escapeHtml(e.name)}</h4>
-          <span class="entry-type">${catLabel}${e.shortDesc ? ' · ' + escapeHtml(e.shortDesc) : ''}</span>
-        </div>
-        <div style="display:flex;gap:6px;">
-          <button class="btn-icon btn-sm" onclick="event.stopPropagation();openWorldModal('${e.id}')" title="Edit">✏️</button>
-          <button class="btn-icon btn-sm" onclick="event.stopPropagation();deleteWorldEntry('${e.id}')" title="Delete">🗑️</button>
-        </div>
-      </div>
-      <div class="world-entry-body">
-        <p>${escapeHtml(e.description || 'No description.')}</p>
-        ${(e.detail1Label || e.detail2Label) ? `<div class="entry-details">
-          ${e.detail1Label ? `<div class="char-attr"><div class="attr-label">${escapeHtml(e.detail1Label)}</div><div class="attr-value">${escapeHtml(e.detail1Value)}</div></div>` : ''}
-          ${e.detail2Label ? `<div class="char-attr"><div class="attr-label">${escapeHtml(e.detail2Label)}</div><div class="attr-value">${escapeHtml(e.detail2Value)}</div></div>` : ''}
-        </div>` : ''}
-        ${e.tags && e.tags.length ? `<div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap;">${e.tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</div>` : ''}
-      </div>
-    </div>`;
+    let html = '<div class="world-entry" id="we-' + e.id + '">' +
+      '<div class="world-entry-header" onclick="toggleWorldEntry(\'' + e.id + '\')">' +
+      '<div class="world-entry-icon" style="background:' + color + '20;color:' + color + '">' + icon + '</div>' +
+      '<div class="world-entry-title"><h4>' + escapeHtml(e.name) + '</h4>' +
+      '<span class="entry-type">' + catLabel + (e.shortDesc ? ' \u00B7 ' + escapeHtml(e.shortDesc) : '') + '</span></div>' +
+      '<div style="display:flex;gap:6px;">' +
+      '<button class="btn-icon btn-sm" onclick="event.stopPropagation();openWorldModal(\'' + e.id + '\')" title="Edit">\u270F\uFE0F</button>' +
+      '<button class="btn-icon btn-sm" onclick="event.stopPropagation();deleteWorldEntry(\'' + e.id + '\')" title="Delete">\uD83D\uDDD1\uFE0F</button>' +
+      '</div></div>';
+    html += '<div class="world-entry-body"><p>' + escapeHtml(e.description || 'No description.') + '</p>';
+    if (e.detail1Label || e.detail2Label) {
+      html += '<div class="entry-details">';
+      if (e.detail1Label) html += '<div class="char-attr"><div class="attr-label">' + escapeHtml(e.detail1Label) + '</div><div class="attr-value">' + escapeHtml(e.detail1Value) + '</div></div>';
+      if (e.detail2Label) html += '<div class="char-attr"><div class="attr-label">' + escapeHtml(e.detail2Label) + '</div><div class="attr-value">' + escapeHtml(e.detail2Value) + '</div></div>';
+      html += '</div>';
+    }
+    if (e.tags && e.tags.length) html += '<div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap;">' + e.tags.map(t => '<span class="tag">' + escapeHtml(t) + '</span>').join('') + '</div>';
+    html += '</div></div>';
+    return html;
   }).join('');
 }
 
 function toggleWorldEntry(id) {
-  document.getElementById('we-' + id)?.classList.toggle('expanded');
+  const el = document.getElementById('we-' + id);
+  if (el) el.classList.toggle('expanded');
 }
 
 function deleteWorldEntry(id) {
   if (!confirm('Delete this world entry?')) return;
-  let entries = getData(KEYS.world);
+  const k = KEYS();
+  let entries = getData(k.world);
   entries = entries.filter(e => e.id !== id);
-  setData(KEYS.world, entries);
+  setData(k.world, entries);
   refreshWorldEntries();
   toast('Entry deleted');
 }
@@ -649,18 +806,15 @@ function filterWorldSearch() {
 // ══════════════════════════════════════════
 let editingNoteId = null;
 let currentNoteFilter = 'all';
+const catColors = { plot: 'var(--primary)', character: 'var(--accent)', world: 'var(--success)', research: 'var(--info)', idea: 'var(--danger)', todo: '#c792ea' };
 
-const catColors = {
-  plot: 'var(--primary)', character: 'var(--accent)',
-  world: 'var(--success)', research: 'var(--info)',
-  idea: 'var(--danger)', todo: '#c792ea'
-};
-
-function openNoteModal(editId = null) {
+function openNoteModal(editId) {
+  editId = editId || null;
   editingNoteId = editId;
   document.getElementById('noteModalTitle').textContent = editId ? 'Edit Note' : 'New Note';
   if (editId) {
-    const notes = getData(KEYS.notes);
+    const k = KEYS();
+    const notes = getData(k.notes);
     const n = notes.find(x => x.id === editId);
     if (n) {
       document.getElementById('noteTitle').value = n.title || '';
@@ -681,8 +835,8 @@ function saveNote() {
   const title = document.getElementById('noteTitle').value.trim();
   const content = document.getElementById('noteContent').value.trim();
   if (!title || !content) { toast('Title and content are required', 'error'); return; }
-
-  const notes = getData(KEYS.notes);
+  const k = KEYS();
+  const notes = getData(k.notes);
   const data = {
     title,
     category: document.getElementById('noteCategory').value,
@@ -690,7 +844,6 @@ function saveNote() {
     priority: document.getElementById('notePriority').value,
     updated: new Date().toISOString(),
   };
-
   if (editingNoteId) {
     const idx = notes.findIndex(n => n.id === editingNoteId);
     if (idx > -1) notes[idx] = { ...notes[idx], ...data };
@@ -699,7 +852,7 @@ function saveNote() {
     data.created = new Date().toISOString();
     notes.push(data);
   }
-  setData(KEYS.notes, notes);
+  setData(k.notes, notes);
   closeModal('noteModal');
   refreshNotes();
   toast(editingNoteId ? 'Note updated' : 'Note created');
@@ -707,36 +860,35 @@ function saveNote() {
 }
 
 function refreshNotes() {
-  const notes = getData(KEYS.notes);
+  const k = KEYS();
+  const notes = getData(k.notes);
   const container = document.getElementById('notesList');
   document.getElementById('noteCount').textContent = notes.length;
   const filtered = currentNoteFilter === 'all' ? notes : notes.filter(n => n.category === currentNoteFilter);
 
   if (filtered.length === 0) {
-    container.innerHTML = `<div class="empty-state"><div class="empty-icon">📝</div><h3>No notes${currentNoteFilter !== 'all' ? ' in this category' : ''}</h3><p>Create notes to keep track of ideas and details.</p><button class="btn btn-primary" onclick="openNoteModal()">Create Note</button></div>`;
+    container.innerHTML = '<div class="empty-state"><div class="empty-icon">\uD83D\uDCDD</div><h3>No notes' + (currentNoteFilter !== 'all' ? ' in this category' : '') + '</h3><p>Create notes to keep track of ideas and details.</p><button class="btn btn-primary" onclick="openNoteModal()">Create Note</button></div>';
     return;
   }
 
   container.innerHTML = filtered.sort((a, b) => new Date(b.updated) - new Date(a.updated)).map(n => {
-    const catIcon = { plot: '📊', character: '👤', world: '🌍', research: '🔬', idea: '💡', todo: '✅' }[n.category] || '📝';
+    const catIcon = { plot: '\uD83D\uDCCA', character: '\uD83D\uDC64', world: '\uD83C\uDF0D', research: '\uD83D\uDD2C', idea: '\uD83D\uDCA1', todo: '\u2705' }[n.category] || '\uD83D\uDCDD';
     const color = catColors[n.category] || 'var(--text-muted)';
-    return `<div class="note-card" onclick="openNoteModal('${n.id}')">
-      <h4>${catIcon} ${escapeHtml(n.title)}</h4>
-      <p>${escapeHtml(n.content)}</p>
-      <div class="note-card-footer">
-        <span style="color:${color}">${n.category ? n.category.charAt(0).toUpperCase() + n.category.slice(1) : ''}</span>
-        <span>${timeAgo(n.updated)}${n.priority === 'high' ? ' · 🔴 High' : ''}</span>
-        <button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();deleteNote('${n.id}')">🗑️</button>
-      </div>
-    </div>`;
+    return '<div class="note-card" onclick="openNoteModal(\'' + n.id + '\')">' +
+      '<h4>' + catIcon + ' ' + escapeHtml(n.title) + '</h4>' +
+      '<p>' + escapeHtml(n.content) + '</p>' +
+      '<div class="note-card-footer"><span style="color:' + color + '">' + (n.category ? n.category.charAt(0).toUpperCase() + n.category.slice(1) : '') + '</span>' +
+      '<span>' + timeAgo(n.updated) + (n.priority === 'high' ? ' \u00B7 \uD83D\uDD34 High' : '') + '</span>' +
+      '<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();deleteNote(\'' + n.id + '\')">\uD83D\uDDD1\uFE0F</button></div></div>';
   }).join('');
 }
 
 function deleteNote(id) {
   if (!confirm('Delete this note?')) return;
-  let notes = getData(KEYS.notes);
+  const k = KEYS();
+  let notes = getData(k.notes);
   notes = notes.filter(n => n.id !== id);
-  setData(KEYS.notes, notes);
+  setData(k.notes, notes);
   refreshNotes();
   toast('Note deleted');
 }
@@ -753,7 +905,8 @@ function filterNotes(cat) {
 function handleGalleryUpload(event) {
   const files = event.target.files;
   if (!files.length) return;
-  const gallery = getData(KEYS.gallery);
+  const k = KEYS();
+  const gallery = getData(k.gallery);
 
   let processed = 0;
   Array.from(files).forEach(file => {
@@ -768,9 +921,9 @@ function handleGalleryUpload(event) {
       });
       processed++;
       if (processed === files.length) {
-        setData(KEYS.gallery, gallery);
+        setData(k.gallery, gallery);
         refreshGallery();
-        toast(`${files.length} image${files.length > 1 ? 's' : ''} uploaded`);
+        toast(files.length + ' image' + (files.length > 1 ? 's' : '') + ' uploaded');
       }
     };
     reader.readAsDataURL(file);
@@ -779,26 +932,27 @@ function handleGalleryUpload(event) {
 }
 
 function refreshGallery() {
-  const gallery = getData(KEYS.gallery);
+  const k = KEYS();
+  const gallery = getData(k.gallery);
   const grid = document.getElementById('galleryGrid');
   if (gallery.length === 0) {
     grid.innerHTML = '';
     return;
   }
   grid.innerHTML = gallery.map(img => {
-    return `<div class="gallery-item" onclick="openLightbox('${img.data.replace(/'/g, "\\'")}')">
-      <img src="${img.data}" alt="${escapeHtml(img.label)}" loading="lazy">
-      <div class="gallery-label">${escapeHtml(img.label)}</div>
-      <button class="btn-icon btn-sm" style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);" onclick="event.stopPropagation();deleteGalleryItem('${img.id}')">🗑️</button>
-    </div>`;
+    return '<div class="gallery-item" onclick="openLightbox(\'' + img.data.replace(/'/g, "\\'") + '\')">' +
+      '<img src="' + img.data + '" alt="' + escapeHtml(img.label) + '" loading="lazy">' +
+      '<div class="gallery-label">' + escapeHtml(img.label) + '</div>' +
+      '<button class="btn-icon btn-sm" style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);" onclick="event.stopPropagation();deleteGalleryItem(\'' + img.id + '\')">\uD83D\uDDD1\uFE0F</button></div>';
   }).join('');
 }
 
 function deleteGalleryItem(id) {
   if (!confirm('Delete this image?')) return;
-  let gallery = getData(KEYS.gallery);
+  const k = KEYS();
+  let gallery = getData(k.gallery);
   gallery = gallery.filter(g => g.id !== id);
-  setData(KEYS.gallery, gallery);
+  setData(k.gallery, gallery);
   refreshGallery();
   toast('Image deleted');
 }
@@ -828,7 +982,8 @@ document.addEventListener('DOMContentLoaded', () => {
 //  SETTINGS & DATA MANAGEMENT
 // ══════════════════════════════════════════
 function saveProjectInfo() {
-  setObj(KEYS.project, {
+  const k = KEYS();
+  setObj(k.project, {
     title: document.getElementById('novelTitle').value,
     author: document.getElementById('authorName').value,
     synopsis: document.getElementById('novelSynopsis').value,
@@ -837,7 +992,8 @@ function saveProjectInfo() {
 }
 
 function loadProjectInfo() {
-  const p = getObj(KEYS.project);
+  const k = KEYS();
+  const p = getObj(k.project);
   document.getElementById('novelTitle').value = p.title || '';
   document.getElementById('authorName').value = p.author || '';
   document.getElementById('novelSynopsis').value = p.synopsis || '';
@@ -845,21 +1001,22 @@ function loadProjectInfo() {
 }
 
 function exportAllData() {
+  const k = KEYS();
   const data = {
-    _version: '1.0',
+    _version: '2.0',
     _exported: new Date().toISOString(),
-    project: getObj(KEYS.project),
-    chapters: getData(KEYS.chapters),
-    characters: getData(KEYS.characters),
-    world: getData(KEYS.world),
-    notes: getData(KEYS.notes),
-    gallery: getData(KEYS.gallery),
+    project: getObj(k.project),
+    chapters: getData(k.chapters),
+    characters: getData(k.characters),
+    world: getData(k.world),
+    notes: getData(k.notes),
+    gallery: getData(k.gallery),
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `novel-studio-backup-${new Date().toISOString().slice(0,10)}.json`;
+  a.download = 'novel-studio-backup-' + new Date().toISOString().slice(0,10) + '.json';
   a.click();
   URL.revokeObjectURL(url);
   toast('Data exported successfully');
@@ -872,12 +1029,13 @@ function importData(event) {
   reader.onload = (e) => {
     try {
       const data = JSON.parse(e.target.result);
-      if (data.chapters) setData(KEYS.chapters, data.chapters);
-      if (data.characters) setData(KEYS.characters, data.characters);
-      if (data.world) setData(KEYS.world, data.world);
-      if (data.notes) setData(KEYS.notes, data.notes);
-      if (data.gallery) setData(KEYS.gallery, data.gallery);
-      if (data.project) setObj(KEYS.project, data.project);
+      const k = KEYS();
+      if (data.chapters) setData(k.chapters, data.chapters);
+      if (data.characters) setData(k.characters, data.characters);
+      if (data.world) setData(k.world, data.world);
+      if (data.notes) setData(k.notes, data.notes);
+      if (data.gallery) setData(k.gallery, data.gallery);
+      if (data.project) setObj(k.project, data.project);
       refreshDashboard();
       toast('Data imported successfully');
     } catch (err) {
@@ -889,16 +1047,17 @@ function importData(event) {
 }
 
 function exportAsText() {
-  const chapters = getData(KEYS.chapters).sort((a, b) => a.order - b.order);
-  const project = getObj(KEYS.project);
+  const k = KEYS();
+  const chapters = getData(k.chapters).sort((a, b) => a.order - b.order);
+  const project = getObj(k.project);
   let text = '';
   if (project.title) text += project.title.toUpperCase() + '\n';
   if (project.author) text += 'by ' + project.author + '\n';
-  text += '\n' + '═'.repeat(50) + '\n\n';
+  text += '\n' + '\u2550'.repeat(50) + '\n\n';
 
   chapters.forEach(ch => {
-    text += `CHAPTER ${ch.order}: ${ch.title || 'Untitled'}\n`;
-    text += '─'.repeat(40) + '\n\n';
+    text += 'CHAPTER ' + ch.order + ': ' + (ch.title || 'Untitled') + '\n';
+    text += '\u2500'.repeat(40) + '\n\n';
     const content = ch.content
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<\/p>/gi, '\n\n')
@@ -919,25 +1078,28 @@ function exportAsText() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${project.title || 'novel'}-manuscript.txt`;
+  a.download = (project.title || 'novel') + '-manuscript.txt';
   a.click();
   URL.revokeObjectURL(url);
   toast('Manuscript exported');
 }
 
 function clearAllData() {
-  if (!confirm('⚠️ This will permanently delete ALL your data including chapters, characters, world entries, notes, and images. This cannot be undone.\n\nAre you sure?')) return;
-  if (!confirm('Final confirmation: Delete everything?')) return;
-  Object.values(KEYS).forEach(k => localStorage.removeItem(k));
+  if (!confirm('\u26A0\uFE0F This will permanently delete ALL data for the current project including chapters, characters, world entries, notes, and images. This cannot be undone.\n\nAre you sure?')) return;
+  if (!confirm('Final confirmation: Delete everything in this project?')) return;
+  const k = KEYS();
+  Object.values(k).forEach(key => localStorage.removeItem(key));
+  activeChapterId = null;
+  document.getElementById('editorActive').style.display = 'none';
+  document.getElementById('editorEmptyState').style.display = 'flex';
   refreshDashboard();
-  toast('All data cleared', 'info');
+  toast('All project data cleared', 'info');
 }
 
 // ══════════════════════════════════════════
 //  KEYBOARD SHORTCUTS
 // ══════════════════════════════════════════
 document.addEventListener('keydown', function(e) {
-  // Ctrl+S — Force save
   if ((e.ctrlKey || e.metaKey) && e.key === 's') {
     e.preventDefault();
     if (activeChapterId) {
@@ -945,7 +1107,6 @@ document.addEventListener('keydown', function(e) {
       toast('Chapter saved');
     }
   }
-  // Escape — Close modals
   if (e.key === 'Escape') {
     document.querySelectorAll('.modal-overlay.open').forEach(m => m.classList.remove('open'));
     closeLightbox();
@@ -956,6 +1117,8 @@ document.addEventListener('keydown', function(e) {
 //  INITIALIZATION
 // ══════════════════════════════════════════
 document.addEventListener('DOMContentLoaded', () => {
+  getActiveProjectId(); // Ensures migration/creation
+  renderProjectSwitcher();
   refreshDashboard();
   updateStorageIndicator();
 });
